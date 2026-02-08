@@ -1,0 +1,259 @@
+# azure-pipelines.yml
+trigger:
+  branches:
+    include:
+      - master
+
+pool:
+  name: default
+
+variables:
+  APP_VERSION: '1.0.$(Build.BuildId)'
+  DOCKER_IMAGE: 'ashu290996/ekart'
+  K8S_NAMESPACE: 'prod'
+
+stages:
+
+# ==================== BUILD STAGE ====================
+- stage: Build
+  displayName: 'Build Stage'
+  jobs:
+  - job: BuildJob
+    displayName: 'Build and Package'
+    steps:
+
+    - checkout: self
+      displayName: 'Checkout Source'
+
+    # - task: JavaToolInstaller@0
+    #   displayName: 'Install JDK 21'
+    #   inputs:
+    #     versionSpec: '21'
+    #     jdkArchitectureOption: 'x64'
+    #     jdkSourceOption: 'PreInstalled'
+    # - task: JavaToolInstaller@0
+    #   displayName: 'Install JDK 21'
+    #   inputs:
+    #     versionSpec: '21'
+    #     jdkArchitectureOption: 'x64'
+    #     jdkSourceOption: 'AzureStorage'
+        
+    - task: Bash@3
+      displayName: 'Set Maven Version'
+      inputs:
+        targetType: 'inline'
+        script: |
+          mvn versions:set \
+            -DnewVersion=$(APP_VERSION) \
+            -DgenerateBackupPoms=false
+
+    - task: Bash@3
+      displayName: 'Maven Compile'
+      inputs:
+        targetType: 'inline'
+        script: mvn compile
+
+    # - task: Bash@3
+    #   displayName: 'Maven Test'
+    #   continueOnError: true
+    #   inputs:
+    #     targetType: 'inline'
+    #     script: mvn test
+
+    - task: PublishTestResults@2
+      displayName: 'Publish Test Results'
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: '**/surefire-reports/*.xml'
+
+    # - task: Bash@3
+    #   displayName: 'Maven Package'
+    #   inputs:
+    #     targetType: 'inline'
+    #     script: mvn clean package -DskipTests=true
+    - task: Maven@4
+      displayName: 'Build with Maven (JDK 21)'
+      inputs:
+       mavenPomFile: 'pom.xml'
+       goals: 'clean package'
+       options: '-DskipTests'
+       javaHomeOption: 'JDKVersion'
+#       jdkVersionOption: '21'
+
+    # - job: DockerBuild
+    #   displayName: 'Docker Build & Push'
+    #   steps:
+    #    - checkout: self
+     
+    - task: Docker@2
+      displayName: 'Build & Push Image'
+      inputs:
+        containerRegistry: 'ashudevops'
+        repository: '$(DOCKER_IMAGE)'
+        command: 'buildAndPush'
+        Dockerfile: 'Dockerfile'
+        tags: |
+          $(APP_VERSION)
+          latest
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Artifact'
+      inputs:
+        pathToPublish: 'target'
+        artifactName: 'drop'
+    # - task: DownloadBuildArtifacts@1
+    #   inputs:
+    #     buildType: 'specific'
+    #     project: 'fb3d3903-9126-41f4-9980-fa36e6a33778'
+    #     pipeline: '7'
+    #     buildVersionToDownload: 'latest'
+    #     downloadType: 'single'
+    #     artifactName: 'drop'
+    #     downloadPath: '$(System.ArtifactsDirectory)'
+    # - task: DownloadBuildArtifacts@1
+    #   inputs:
+    #     buildType: 'specific'
+    #     project: 'fb3d3903-9126-41f4-9980-fa36e6a33778'
+    #     pipeline: '7'
+    #     specificBuildWithTriggering: true
+    #     buildVersionToDownload: 'latestFromBranch'
+    #     allowPartiallySucceededBuilds: true
+    #     branchName: 'refs/heads/master'
+    #     tags: 'bankapp-1.0.28.jar'
+    #     downloadType: 'specific'
+    #     downloadPath: '$(System.ArtifactsDirectory)'
+# ==================== NEXUS UPLOAD STAGE ====================
+- stage: NexusUpload
+  displayName: 'Nexus Upload'
+  dependsOn: Build
+  jobs:
+  - job: NexusUploadJob
+    displayName: 'Deploy to Nexus'
+    continueOnError: true
+    steps:
+    - checkout: self
+
+    - task: Maven@4
+      displayName: 'Maven Deploy'
+      inputs:
+        mavenPomFile: 'pom.xml'
+        goals: 'deploy'
+        options: '-DskipTests'
+        javaHomeOption: 'JDKVersion'
+#        jdkVersionOption: '21'
+        mavenAuthenticateFeed: true
+
+# ==================== SECURITY & DOCKER STAGE ====================
+- stage: SecurityScans
+  displayName: 'Security Scans & Docker'
+  dependsOn: Build
+  jobs:
+
+  - job: SonarAnalysis
+    displayName: 'SonarQube Analysis'
+    continueOnError: true
+    steps:
+    - checkout: self
+
+    - task: SonarQubePrepare@8
+      inputs:
+        SonarQube: 'sonarqube'
+        scannerMode: 'CLI'
+        configMode: 'manual'
+        cliProjectKey: 'Multi-Tier-BankApp-CI'
+        cliProjectName: 'Multi-Tier-BankApp-CI'
+        cliSources: '.'
+        extraProperties: |
+          sonar.java.binaries=.
+    - task: SonarQubeAnalyze@8
+
+    - task: SonarQubePublish@8
+      inputs:
+        pollingTimeoutSec: '300'
+
+  # - job: OWASPScan
+  #   displayName: 'OWASP Dependency Check'
+  #   continueOnError: true
+  #   steps:
+  #   - checkout: self
+
+    - task: dependency-check-build-task@6
+      inputs:
+        projectName: 'Multi-Tier-BankApp'
+        scanPath: '$(Build.SourcesDirectory)'
+        format: 'HTML'
+        uploadReports: true
+        failOnCVSS: '8'
+
+
+
+  - job: TrivyScan
+    displayName: 'Trivy Image Scan'
+#    dependsOn: DockerBuild
+    continueOnError: true
+    steps:
+    # - task: Bash@3
+    #   displayName: 'Install Trivy'
+    #   inputs:
+    #     targetType: 'inline'
+    #     script: |
+    #       sudo apt-get update
+    #       sudo apt-get install -y wget
+    #       wget https://github.com/aquasecurity/trivy/releases/latest/download/trivy_0.49.1_Linux-64bit.deb
+    #       sudo dpkg -i trivy_0.49.1_Linux-64bit.deb
+
+    - task: Bash@3
+      displayName: 'Run Trivy Scan'
+      inputs:
+        targetType: 'inline'
+        script: |
+          trivy image $(DOCKER_IMAGE):$(APP_VERSION)
+
+# ==================== DEPLOY STAGE ====================
+# - stage: Deploy
+#   displayName: 'Deploy to Kubernetes'
+#   dependsOn:
+#     - SecurityScans
+#     - NexusUpload
+#   jobs:
+#   - deployment: DeployToK8s
+#     environment: 'production'
+#     strategy:
+#       runOnce:
+#         deploy:
+#           steps:
+
+#           - checkout: git://YourProject/Multi-Tier-BankApp-CD@master
+
+#           - task: KubernetesManifest@0
+#             displayName: 'Deploy App'
+#             inputs:
+#               action: deploy
+#               kubernetesServiceConnection: 'k8s-prod-connection'
+#               namespace: '$(K8S_NAMESPACE)'
+#               manifests: bankapp/bankapp-ds.yml
+
+#           - task: Kubernetes@1
+#             displayName: 'Update Image'
+#             inputs:
+#               connectionType: 'Kubernetes Service Connection'
+#               kubernetesServiceEndpoint: 'k8s-prod-connection'
+#               namespace: '$(K8S_NAMESPACE)'
+#               command: set
+#               arguments: >
+#                 image deployment/bankapp-deployment
+#                 bankapp=$(DOCKER_IMAGE):$(APP_VERSION)
+
+# ==================== CLEANUP ====================
+# - stage: Cleanup
+#   displayName: 'Cleanup & Notify'
+#   condition: always()
+#   jobs:
+#   - job: Notify
+#     steps:
+#     - task: Bash@3
+#       inputs:
+#         targetType: 'inline'
+#         script: |
+#           echo "Pipeline completed"
+#           echo "Build ID: $(Build.BuildId)"
+#           echo "Version: $(APP_VERSION)"
